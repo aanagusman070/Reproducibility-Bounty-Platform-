@@ -7,6 +7,7 @@
 (define-constant ERR_NOT_STUDY_AUTHOR u106)
 (define-constant ERR_STUDY_EXPIRED u107)
 (define-constant ERR_INVALID_RESULT u108)
+(define-constant ERR_INVALID_EXTENSION u109)
 
 (define-constant STATUS_PENDING u0)
 (define-constant STATUS_VALIDATED u1)
@@ -229,6 +230,37 @@
       
       (ok reward-amount)
     )
+  )
+)
+
+(define-public (extend-bounty
+  (study-id uint)
+  (additional-amount uint)
+  (additional-blocks uint)
+)
+  (let
+    (
+      (study (unwrap! (map-get? studies study-id) (err ERR_STUDY_NOT_FOUND)))
+      (new-bounty (+ (get bounty-amount study) additional-amount))
+      (new-deadline (+ (get deadline study) additional-blocks))
+    )
+    (asserts! (is-eq tx-sender (get author study)) (err ERR_NOT_STUDY_AUTHOR))
+    (asserts! (is-eq (get status study) STATUS_PENDING) (err ERR_INVALID_STATUS))
+    (asserts! (> additional-amount u0) (err ERR_INVALID_EXTENSION))
+    (asserts! (<= burn-block-height (get deadline study)) (err ERR_STUDY_EXPIRED))
+    
+    (try! (stx-transfer? additional-amount tx-sender (as-contract tx-sender)))
+    
+    (map-set studies study-id
+      (merge study
+        {
+          bounty-amount: new-bounty,
+          deadline: new-deadline
+        }
+      )
+    )
+    
+    (ok {new-bounty: new-bounty, new-deadline: new-deadline})
   )
 )
 
