@@ -8,6 +8,8 @@
 (define-constant ERR_STUDY_EXPIRED u107)
 (define-constant ERR_INVALID_RESULT u108)
 (define-constant ERR_INVALID_EXTENSION u109)
+(define-constant ERR_ALREADY_VOTED u110)
+(define-constant ERR_CONSENSUS_NOT_REACHED u111)
 
 (define-constant STATUS_PENDING u0)
 (define-constant STATUS_VALIDATED u1)
@@ -17,6 +19,7 @@
 (define-data-var next-study-id uint u1)
 (define-data-var next-replication-id uint u1)
 (define-data-var platform-fee uint u250)
+(define-data-var consensus-threshold uint u2)
 
 (define-map studies
   uint
@@ -62,6 +65,16 @@
 (define-map validators
   principal
   bool
+)
+
+(define-map replication-votes
+  {replication-id: uint, validator: principal}
+  {vote: bool, voted-at: uint}
+)
+
+(define-map replication-vote-counts
+  uint
+  {approve-count: uint, reject-count: uint, total-validators: uint}
 )
 
 (define-public (initialize-platform)
@@ -329,4 +342,98 @@
 
 (define-read-only (get-next-replication-id)
   (var-get next-replication-id)
+)
+
+(define-public (vote-on-replication
+  (replication-id uint)
+  (approve bool)
+)
+  (let
+    (
+      (replication (unwrap! (map-get? replications replication-id) (err ERR_REPLICATION_NOT_FOUND)))
+      (vote-key {replication-id: replication-id, validator: tx-sender})
+      (vote-counts (default-to {approve-count: u0, reject-count: u0, total-validators: u0}
+                               (map-get? replication-vote-counts replication-id)))
+      (threshold (var-get consensus-threshold))
+    )
+    (asserts! (default-to false (map-get? validators tx-sender)) (err ERR_NOT_AUTHORIZED))
+    (asserts! (is-eq (get status replication) STATUS_PENDING) (err ERR_INVALID_STATUS))
+    (asserts! (is-none (map-get? replication-votes vote-key)) (err ERR_ALREADY_VOTED))
+    
+    (map-set replication-votes vote-key
+      {vote: approve, voted-at: burn-block-height}
+    )
+    
+    (let
+      (
+        (new-approve-count (if approve (+ (get approve-count vote-counts) u1) (get approve-count vote-counts)))
+        (new-reject-count (if approve (get reject-count vote-counts) (+ (get reject-count vote-counts) u1)))
+        (new-total (+ (get total-validators vote-counts) u1))
+      )
+      (map-set replication-vote-counts replication-id
+        {approve-count: new-approve-count, reject-count: new-reject-count, total-validators: new-total}
+      )
+      
+      (if (>= new-approve-count threshold)
+        (begin
+          (map-set replications replication-id
+            (merge replication
+              {
+                status: STATUS_VALIDATED,
+                validated-at: (some burn-block-height),
+                validator: (some tx-sender)
+              }
+            )
+          )
+          (let
+            (
+              (researcher (get researcher replication))
+              (current-stats (default-to {total-replications: u0, successful-replications: u0, total-rewards: u0}
+                                         (map-get? researcher-stats researcher)))
+            )
+            (map-set researcher-stats researcher
+              (merge current-stats {successful-replications: (+ (get successful-replications current-stats) u1)}))
+          )
+          (ok {status: STATUS_VALIDATED, approve-count: new-approve-count, reject-count: new-reject-count})
+        )
+        (if (>= new-reject-count threshold)
+          (begin
+            (map-set replications replication-id
+              (merge replication
+                {
+                  status: STATUS_REJECTED,
+                  validated-at: (some burn-block-height),
+                  validator: (some tx-sender)
+                }
+              )
+            )
+            (ok {status: STATUS_REJECTED, approve-count: new-approve-count, reject-count: new-reject-count})
+          )
+          (ok {status: STATUS_PENDING, approve-count: new-approve-count, reject-count: new-reject-count})
+        )
+      )
+    )
+  )
+)
+
+(define-public (set-consensus-threshold (new-threshold uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get platform-owner)) (err ERR_NOT_AUTHORIZED))
+    (asserts! (> new-threshold u0) (err ERR_INVALID_RESULT))
+    (var-set consensus-threshold new-threshold)
+    (ok true)
+  )
+)
+
+(define-read-only (get-replication-votes (replication-id uint))
+  (default-to {approve-count: u0, reject-count: u0, total-validators: u0}
+              (map-get? replication-vote-counts replication-id))
+)
+
+(define-read-only (get-validator-vote (replication-id uint) (validator principal))
+  (map-get? replication-votes {replication-id: replication-id, validator: validator})
+)
+
+(define-read-only (get-consensus-threshold)
+  (var-get consensus-threshold)
 )
